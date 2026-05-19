@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+training_metrics.log
+incidents_consolides.csv
+
+*.pkl
+*.pt

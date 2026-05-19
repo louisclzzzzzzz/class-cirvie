@@ -1,0 +1,6 @@
+timestamp,run_id,pipeline,model_type,omv_acc,omv_f1,svc_acc,svc_f1,ori_acc,ori_f1,comment
+2026-05-11 13:49:12,20260511_134912,main.py,TF-IDF + LogReg,0.9837,0.9830,0.7904,0.6913,0.7172,0.6579,Test de la nouvelle structure CSV wide
+2026-05-11 13:51:34,20260511_135134,main.py,TF-IDF + LogReg,0.9832,0.9824,0.7943,0.7020,0.6881,0.6696,"Test hyperparamètres CLI : features=5000, C_omv=1.0"
+2026-05-11 13:56:55,20260511_135655,main.py,TF-IDF + LogReg,0.9811,0.9803,0.7793,0.6274,0.7087,0.6816,test 10% min sample 15
+2026-05-19 11:08:30,20260519_110830,main.py,TF-IDF + LogReg,0.9837,0.9830,0.7880,0.6864,0.7172,0.6579,
+2026-05-19 11:24:40,20260519_112440,main.py,TF-IDF + LogReg,0.9837,0.9830,0.7650,0.5820,0.7172,0.6579,
