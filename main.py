@@ -16,6 +16,7 @@ Le coeur modèle est remplacé par un pipeline scikit-learn sparse :
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import pickle
 import re
@@ -27,11 +28,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from sklearn.svm import LinearSVC
 
 from metrics_logger import log_results
 
@@ -67,8 +71,6 @@ def update_config_from_args(args: argparse.Namespace):
         CONFIG["tfidf"]["max_features"] = args.max_features
     if args.c_omv:
         CONFIG["logreg"]["OMV"]["C"] = args.c_omv
-    if args.c_service:
-        CONFIG["logreg"]["SERVICE"]["C"] = args.c_service
     if args.c_origine:
         CONFIG["logreg"]["ORIGINE"]["C"] = args.c_origine
 
@@ -107,7 +109,6 @@ VILLE_PATTERN = r"\b(" + "|".join(VILLES) + r")\b"
 
 TABULAR_CONFIG = {
     "OMV": ["CAUSE", "TRAITE", "DEMANDEUR", "VILLE", "URGENCE_CAT"],
-    "SERVICE": ["CAUSE", "TRAITE", "DEMANDEUR", "VILLE", "URGENCE_CAT"],
     "ORIGINE": ["CAUSE", "TRAITE", "DEMANDEUR", "VILLE", "URGENCE_CAT"],
 }
 
@@ -115,6 +116,30 @@ ARTIFACTS = {
     "OMV": "model_fast_omv.pkl",
     "SERVICE": "model_fast_service.pkl",
     "ORIGINE": "model_fast_origine.pkl",
+}
+
+TUNING_GRIDS: dict[str, dict[str, Any]] = {
+    "logreg": {
+        "label": "LogisticRegression",
+        "grids": {
+            "OMV":    {"C": [0.5, 1.0, 2.0, 5.0], "solver": ["liblinear", "saga"], "max_iter": [1500]},
+            "ORIGINE": {"C": [1.0, 2.0, 5.0, 10.0], "solver": ["saga"], "max_iter": [2500]},
+        },
+    },
+    "linearsvc": {
+        "label": "LinearSVC (calibré)",
+        "grids": {
+            "OMV":    {"C": [0.1, 0.5, 1.0, 5.0]},
+            "ORIGINE": {"C": [0.1, 0.5, 1.0, 5.0]},
+        },
+    },
+    "random_forest": {
+        "label": "RandomForest",
+        "grids": {
+            "OMV":    {"n_estimators": [100, 200], "max_depth": [None, 10], "min_samples_leaf": [1, 3]},
+            "ORIGINE": {"n_estimators": [100, 200], "max_depth": [None, 10, 20], "min_samples_leaf": [1, 3]},
+        },
+    },
 }
 
 MANUAL_TEST_CASES = [
@@ -142,8 +167,8 @@ MANUAL_TEST_CASES = [
         "cause": "MOT DE PASSE",
         "traite": "EXP SUPPORT HABILITATION",
         "expected_omv": "NON",
-        "expected_service": "TOUS",
-        "expected_origine": "ASSISTANCE UTILISATEURS",
+        "expected_service": None,
+        "expected_origine": None,
     },
     {
         "label": "Anomalie 990I décès",
@@ -169,8 +194,8 @@ MANUAL_TEST_CASES = [
         "cause": "BATCH",
         "traite": "EXP OPÉRATIONS DOMAINE VCP",
         "expected_omv": "NON",
-        "expected_service": "TOUS",
-        "expected_origine": "PROGRAMME",
+        "expected_service": None,
+        "expected_origine": None,
     },
     {
         "label": "Sinistre collectif Nancy",
@@ -327,7 +352,6 @@ def clean(df: pd.DataFrame, agent_to_service: dict[str, str]) -> pd.DataFrame:
     df["SERVICE_DETERMINISTE"] = df["DEMANDEUR"].apply(
         lambda demandeur: lookup_service(demandeur, agent_to_service)
     )
-
     df["VILLE"] = (
         df["Description"].str.upper().str.extract(VILLE_PATTERN, expand=False).fillna("NON_PRECISEE")
     )
@@ -502,7 +526,7 @@ def run_pipeline_omv(df: pd.DataFrame) -> dict[str, Any]:
 
 def run_pipeline_origine(df: pd.DataFrame) -> dict[str, Any]:
     banner("ETAPE 3 — ORIGINE (toutes classes, normalisation typo uniquement)")
-    df_sub = df[df["ORIGINE_clean"].notna() & (df["Description"] != "")].copy()
+    df_sub = df[df["ORIGINE_clean"].notna() & (df["OMV"] == "OUI") & (df["Description"] != "")].copy()
     df_sub = _filter_classes(df_sub, "ORIGINE_clean", CONFIG["min_samples"])
     result = _train_and_eval(df_sub, "ORIGINE_clean", "ORIGINE", TABULAR_CONFIG["ORIGINE"])
     _print_test_metrics(result, "Résultats test — ORIGINE")
@@ -511,26 +535,20 @@ def run_pipeline_origine(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def run_pipeline_service(df: pd.DataFrame, agent_to_service: dict[str, str]) -> dict[str, Any]:
-    banner("ETAPE 2 — SERVICE (ML binaire : TOUS vs service du demandeur)")
+    banner("ETAPE 2 — SERVICE (lookup déterministe)")
 
-    df_sub = df[df["SERVICE_clean"].notna() & (df["Description"] != "")].copy()
+    n_known = int(df["SERVICE_DETERMINISTE"].notna().sum())
+    pct_known = n_known / max(len(df), 1) * 100
 
-    # Cible binaire : TOUS ou SPECIFIQUE (le lookup donnera le service exact à l'inférence)
-    df_sub["SERVICE_BINARY"] = df_sub["SERVICE_clean"].apply(
-        lambda x: "TOUS" if x == "TOUS" else "SPECIFIQUE"
-    )
+    section("Couverture du lookup")
+    metric_line("Lignes totales", str(len(df)))
+    metric_line("Demandeurs identifiés → service spécifique", f"{n_known} ({pct_known:.1f}%)")
+    metric_line("Non identifiés → TOUS", f"{len(df) - n_known} ({100 - pct_known:.1f}%)")
 
-    section("Distribution de la cible binaire")
-    counts = df_sub["SERVICE_BINARY"].value_counts()
-    for label, count in counts.items():
-        metric_line(label, f"{count} ({count / len(df_sub) * 100:.1f}%)")
-
-    result = _train_and_eval(df_sub, "SERVICE_BINARY", "SERVICE", TABULAR_CONFIG["SERVICE"])
-    _print_test_metrics(result, "Résultats test — SERVICE (TOUS vs SPECIFIQUE)")
-
-    result["label"] = "SERVICE"
-    result["agent_to_service"] = agent_to_service
-    return result
+    return {
+        "label": "SERVICE",
+        "agent_to_service": agent_to_service,
+    }
 
 
 # ============================================================================
@@ -538,20 +556,26 @@ def run_pipeline_service(df: pd.DataFrame, agent_to_service: dict[str, str]) -> 
 # ============================================================================
 
 def save_artifact(key: str, result: dict[str, Any], agent_to_service: dict[str, str] | None = None) -> None:
-    bundle = {
-        "model": result["model"],
-        "tfidf": result["tfidf"],
-        "ohe": result["ohe"],
-        "label_encoder": result["label_encoder"],
-        "cat_cols": result["cat_cols"],
-        "target_col": result["target_col"],
-        "config": CONFIG,
-        "service_map": SERVICE_MAP,
-        "origine_map": ORIGINE_MAP,
-        "villes": VILLES,
-    }
-    if agent_to_service is not None:
-        bundle["agent_to_service"] = agent_to_service
+    if key == "SERVICE":
+        bundle = {
+            "agent_to_service": agent_to_service or {},
+            "config": CONFIG,
+        }
+    else:
+        bundle = {
+            "model": result["model"],
+            "tfidf": result["tfidf"],
+            "ohe": result["ohe"],
+            "label_encoder": result["label_encoder"],
+            "cat_cols": result["cat_cols"],
+            "target_col": result["target_col"],
+            "config": CONFIG,
+            "service_map": SERVICE_MAP,
+            "origine_map": ORIGINE_MAP,
+            "villes": VILLES,
+        }
+        if agent_to_service is not None:
+            bundle["agent_to_service"] = agent_to_service
 
     with open(ARTIFACTS[key], "wb") as handle:
         pickle.dump(bundle, handle)
@@ -632,35 +656,39 @@ def predict(
     row = _prepare_inference_row(description, demandeur, cause, traite, urgence)
 
     omv = _infer_single("OMV", row, top_n=2)
-    origine = _infer_single("ORIGINE", row, top_n=top_n)
 
+    if omv["prediction"] == "NON":
+        return {
+            "omv": {
+                "prediction": "NON",
+                "confidence": round(omv["confidence"] * 100, 1),
+                "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in omv["top_n"]],
+            },
+            "service": None,
+            "origine": None,
+        }
+
+    # SERVICE : lookup déterministe (uniquement si OMV = OUI)
     service_bundle = load_inference_bundle("SERVICE")
     agent_to_service = service_bundle.get("agent_to_service", {})
     dem_norm = row["DEMANDEUR"].iloc[0]
     deterministic_service = lookup_service(dem_norm, agent_to_service)
+    selected_service = deterministic_service if deterministic_service else "TOUS"
+    service_source = "deterministe" if deterministic_service else "tous"
 
-    # ML décide : TOUS ou SPECIFIQUE
-    service_binary = _predict_from_bundle(service_bundle, row, top_n=2)
-    ml_says_specifique = service_binary["prediction"] == "SPECIFIQUE"
-
-    if ml_says_specifique and deterministic_service:
-        selected_service = deterministic_service
-        service_source = "deterministe"
-    else:
-        selected_service = "TOUS"
-        service_source = "tous"
+    origine = _infer_single("ORIGINE", row, top_n=top_n)
 
     return {
         "omv": {
-            "prediction": omv["prediction"],
+            "prediction": "OUI",
             "confidence": round(omv["confidence"] * 100, 1),
             "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in omv["top_n"]],
         },
         "service": {
             "prediction": selected_service,
-            "confidence": round(service_binary["confidence"] * 100, 1),
+            "confidence": 100.0,
             "source": service_source,
-            "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in service_binary["top_n"]],
+            "top_n": [{"classe": selected_service, "probabilite": 1.0}],
         },
         "origine": {
             "prediction": origine["prediction"],
@@ -671,7 +699,93 @@ def predict(
 
 
 # ============================================================================
-# 9. RAPPORT
+# 9. TUNING
+# ============================================================================
+
+def _make_tuning_classifier(clf_name: str, params: dict) -> Any:
+    rs = CONFIG["random_state"]
+    if clf_name == "logreg":
+        return LogisticRegression(**params, class_weight="balanced", n_jobs=-1, random_state=rs)
+    if clf_name == "linearsvc":
+        return CalibratedClassifierCV(
+            LinearSVC(**params, class_weight="balanced", random_state=rs, max_iter=3000, dual="auto")
+        )
+    if clf_name == "random_forest":
+        return RandomForestClassifier(**params, class_weight="balanced", n_jobs=-1, random_state=rs)
+    raise ValueError(f"Classifieur inconnu : {clf_name}")
+
+
+def _param_combos(grid: dict[str, list]) -> list[dict]:
+    if not grid:
+        return [{}]
+    return [dict(zip(grid.keys(), combo)) for combo in itertools.product(*grid.values())]
+
+
+def run_tuning(df: pd.DataFrame, target_col: str, target_key: str, cat_cols: list[str]) -> None:
+    banner(f"TUNING — {target_key}")
+
+    df_sub = df[df[target_col].notna() & (df["Description"] != "")].copy()
+    df_sub = _filter_classes(df_sub, target_col, CONFIG["min_samples"])
+
+    label_encoder = LabelEncoder()
+    df_sub["target_encoded"] = label_encoder.fit_transform(df_sub[target_col])
+
+    stratify = (
+        df_sub["target_encoded"]
+        if df_sub["target_encoded"].value_counts().min() >= 2
+        else None
+    )
+    df_train, df_test = train_test_split(
+        df_sub, test_size=CONFIG["test_size"], random_state=CONFIG["random_state"], stratify=stratify
+    )
+
+    tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, CONFIG["tfidf"])
+    x_train = transform_features(df_train, tfidf, ohe, cat_cols)
+    x_test = transform_features(df_test, tfidf, ohe, cat_cols)
+    y_train = df_train["target_encoded"].to_numpy(dtype=np.int64)
+    y_test = df_test["target_encoded"].to_numpy(dtype=np.int64)
+
+    summary: list[tuple[str, float, float, dict]] = []
+
+    for clf_name, clf_config in TUNING_GRIDS.items():
+        section(f"Classifieur : {clf_config['label']}")
+        combos = _param_combos(clf_config["grids"].get(target_key, {}))
+        print(f"  {len(combos)} combinaison(s) à tester...")
+
+        best_f1 = -1.0
+        best_acc = 0.0
+        best_params: dict = {}
+
+        for params in combos:
+            model = _make_tuning_classifier(clf_name, params)
+            model.fit(x_train, y_train)
+            y_pred = model.predict(x_test)
+            f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
+            acc = accuracy_score(y_test, y_pred)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_acc = acc
+                best_params = params
+
+        metric_line("Meilleur F1 macro", f"{best_f1:.4f}")
+        metric_line("Accuracy associée", f"{best_acc:.4f}")
+        metric_line("Meilleurs params", str(best_params))
+        summary.append((clf_config["label"], best_f1, best_acc, best_params))
+
+    summary.sort(key=lambda x: x[1], reverse=True)
+    section(f"Classement final — {target_key}")
+    for rank, (label, f1, acc, params) in enumerate(summary, 1):
+        print(f"  #{rank}  {label:<25}  F1={f1:.4f}  Acc={acc:.4f}  {params}")
+
+
+def run_tuning_all(df: pd.DataFrame) -> None:
+    run_tuning(df, "OMV", "OMV", TABULAR_CONFIG["OMV"])
+    df_omv = df[df["OMV"] == "OUI"].copy()
+    run_tuning(df_omv, "ORIGINE_clean", "ORIGINE", TABULAR_CONFIG["ORIGINE"])
+
+
+# ============================================================================
+# 10. RAPPORT
 # ============================================================================
 
 def _gain(current: float, baseline: float | None) -> str:
@@ -689,7 +803,6 @@ def print_comparison_table(results: dict[str, dict[str, Any]]) -> None:
 
     rows = [
         ("OMV", "OMV", results["OMV"]["metrics"]),
-        ("SERVICE (TOUS/SPEC)", "SERVICE", results["SERVICE"]["metrics"]),
         ("ORIGINE", "ORIGINE", results["ORIGINE"]["metrics"]),
     ]
     for display, baseline_key, metrics in rows:
@@ -701,6 +814,7 @@ def print_comparison_table(results: dict[str, dict[str, Any]]) -> None:
         print(
             f"║ {display:<16} ║   {f1_base_str:<10} ║   {f1_current:.4f}     ║  {gain:<9} ║"
         )
+    print(f"║ {'SERVICE':<16} ║   {'N/A':<10} ║   lookup JSON     ║  {'  —':<9} ║")
 
     print("╚══════════════════╩══════════════╩══════════════╩════════════╝")
 
@@ -718,37 +832,42 @@ def print_manual_tests() -> None:
         )
 
         omv_ok = "✓" if result["omv"]["prediction"] == case["expected_omv"] else "✗"
-        svc_ok = "✓" if result["service"]["prediction"] == case["expected_service"] else "✗"
-        ori_ok = "✓" if result["origine"]["prediction"] == case["expected_origine"] else "✗"
-        svc_src = f"[{result['service']['source'].upper()}]"
 
         print(f"\n[{case['label']}]")
         print(
             f"OMV     {omv_ok}  prédit={result['omv']['prediction']} "
             f"(conf {result['omv']['confidence']:.0f}%)  attendu={case['expected_omv']}"
         )
-        print(
-            f"SERVICE {svc_ok}  prédit={result['service']['prediction']} {svc_src}  "
-            f"attendu={case['expected_service']}"
-        )
-        print(
-            f"ORIGINE {ori_ok}  prédit={result['origine']['prediction']}  "
-            f"attendu={case['expected_origine']}"
-        )
-        print(
-            "         top 3 : "
-            + " | ".join(
-                f"{item['classe']} ({item['probabilite']:.2f})"
-                for item in result["origine"]["top_n"]
+
+        if result["service"] is None:
+            print("SERVICE —  (non applicable, OMV=NON)")
+            print("ORIGINE —  (non applicable, OMV=NON)")
+        else:
+            svc_ok = "✓" if result["service"]["prediction"] == case["expected_service"] else "✗"
+            ori_ok = "✓" if result["origine"]["prediction"] == case["expected_origine"] else "✗"
+            svc_src = f"[{result['service']['source'].upper()}]"
+            print(
+                f"SERVICE {svc_ok}  prédit={result['service']['prediction']} {svc_src}  "
+                f"attendu={case['expected_service']}"
             )
-        )
+            print(
+                f"ORIGINE {ori_ok}  prédit={result['origine']['prediction']}  "
+                f"attendu={case['expected_origine']}"
+            )
+            print(
+                "         top 3 : "
+                + " | ".join(
+                    f"{item['classe']} ({item['probabilite']:.2f})"
+                    for item in result["origine"]["top_n"]
+                )
+            )
 
 
 # ============================================================================
 # 10. MAIN
 # ============================================================================
 
-def main(comment: str = "") -> None:
+def main(comment: str = "", tune: bool = False) -> None:
     banner("INITIALISATION")
     print("  Backend modèle : TF-IDF + OneHotEncoder + LogisticRegression")
 
@@ -761,6 +880,10 @@ def main(comment: str = "") -> None:
     metric_line("Lignes totales après nettoyage", str(len(df)))
     det_rate = df["SERVICE_DETERMINISTE"].notna().mean() * 100
     metric_line("Demandeurs connus via JSON (%)", f"{det_rate:.1f}%")
+
+    if tune:
+        run_tuning_all(df)
+        return
 
     results: dict[str, dict[str, Any]] = {}
     results["OMV"] = run_pipeline_omv(df)
@@ -789,10 +912,12 @@ if __name__ == "__main__":
     parser.add_argument("--test-size", type=float, help="Ratio du jeu de test (ex: 0.2)")
     parser.add_argument("--max-features", type=int, help="Nombre max de features TF-IDF (ex: 12000)")
     parser.add_argument("--c-omv", type=float, help="Régularisation C pour OMV")
-    parser.add_argument("--c-service", type=float, help="Régularisation C pour SERVICE")
     parser.add_argument("--c-origine", type=float, help="Régularisation C pour ORIGINE")
-    
+
+    # Tuning
+    parser.add_argument("--tune", action="store_true", help="Comparer LogReg / LinearSVC / RandomForest sur une grille de paramètres")
+
     args = parser.parse_args()
-    
+
     update_config_from_args(args)
-    main(comment=args.comment)
+    main(comment=args.comment, tune=args.tune)
