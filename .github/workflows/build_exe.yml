@@ -2,12 +2,16 @@ name: Build predict_server.exe (Windows)
 
 on:
   push:
+    branches: [main]
     paths:
       - 'predict_server.py'
       - 'main.py'
-      - 'requirements.txt'
+      - 'requirements_server.txt'
       - '.github/workflows/build_exe.yml'
-  workflow_dispatch:   # déclenchement manuel depuis l'onglet Actions
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -32,15 +38,13 @@ jobs:
         run: |
           python -m PyInstaller --onefile --noconsole `
             --name predict_server `
-            --add-data "model_fast_omv.pkl;." `
-            --add-data "model_fast_service.pkl;." `
-            --add-data "model_fast_origine.pkl;." `
-            --add-data "nom_service.json;." `
             predict_server.py
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: predict_server_windows
-          path: dist/predict_server.exe
-          retention-days: 30
+      - name: Move exe to repo root and commit
+        run: |
+          copy dist\predict_server.exe predict_server.exe
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add predict_server.exe
+          git diff --cached --quiet && echo "Pas de changement" || git commit -m "ci: rebuild predict_server.exe [skip ci]"
+          git push

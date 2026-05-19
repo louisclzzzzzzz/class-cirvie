@@ -8,11 +8,14 @@ import sys
 import os
 from pathlib import Path
 
-# Résolution des chemins que PyInstaller extrait dans sys._MEIPASS
-BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+# Quand on tourne depuis un exe PyInstaller --onefile, les .pkl et nom_service.json
+# sont dans le même dossier que l'exe (sys.executable), pas dans sys._MEIPASS.
+# En développement normal, ils sont à côté de ce fichier.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
 
-# Forcer le répertoire de travail courant sur BASE_DIR pour que
-# main.py trouve les .pkl et nom_service.json
 os.chdir(BASE_DIR)
 
 from flask import Flask, request, jsonify
