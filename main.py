@@ -51,28 +51,37 @@ CONFIG = {
     "random_state": 42,
     "min_samples": 30,
     "tfidf": {
-        "max_features": 12000,
-        "ngram_range": (1, 2),
-        "min_df": 2,
-        "sublinear_tf": True,
-        "strip_accents": "unicode",
+        "OMV": {
+            "max_features": 8000,
+            "ngram_range": (2, 3),
+            "min_df": 2,
+            "sublinear_tf": True,
+            "strip_accents": "unicode",
+        },
+        "ORIGINE": {
+            "max_features": 20000,
+            "ngram_range": (1, 2),
+            "min_df": 2,
+            "sublinear_tf": True,
+            "strip_accents": "unicode",
+        },
     },
-    "logreg": {
-        "OMV": {"C": 2.0, "solver": "liblinear", "max_iter": 1500},
-        "ORIGINE": {"C": 5.0, "solver": "saga", "max_iter": 2500},
+    "linearsvc": {
+        "OMV": {"C": 0.5},
+        "ORIGINE": {"C": 5.0},
     },
 }
 
 def update_config_from_args(args: argparse.Namespace):
-    """Met à jour la configuration globale avec les arguments CLI."""
     if args.test_size:
         CONFIG["test_size"] = args.test_size
     if args.max_features:
-        CONFIG["tfidf"]["max_features"] = args.max_features
+        CONFIG["tfidf"]["OMV"]["max_features"] = args.max_features
+        CONFIG["tfidf"]["ORIGINE"]["max_features"] = args.max_features
     if args.c_omv:
-        CONFIG["logreg"]["OMV"]["C"] = args.c_omv
+        CONFIG["linearsvc"]["OMV"]["C"] = args.c_omv
     if args.c_origine:
-        CONFIG["logreg"]["ORIGINE"]["C"] = args.c_origine
+        CONFIG["linearsvc"]["ORIGINE"]["C"] = args.c_origine
 
 DATA_FILE = "data3.csv"
 NOM_SERVICE_FILE = "nom_service.json"
@@ -401,15 +410,16 @@ def transform_features(
     return sp.hstack([x_text, x_cat], format="csr")
 
 
-def build_model(target_key: str) -> LogisticRegression:
-    params = CONFIG["logreg"][target_key]
-    return LogisticRegression(
-        C=params["C"],
-        solver=params["solver"],
-        max_iter=params["max_iter"],
-        class_weight="balanced",
-        n_jobs=-1,
-        random_state=CONFIG["random_state"],
+def build_model(target_key: str) -> CalibratedClassifierCV:
+    params = CONFIG["linearsvc"][target_key]
+    return CalibratedClassifierCV(
+        LinearSVC(
+            C=params["C"],
+            class_weight="balanced",
+            max_iter=3000,
+            dual="auto",
+            random_state=CONFIG["random_state"],
+        )
     )
 
 
@@ -467,7 +477,7 @@ def _train_and_eval(
         stratify=stratify,
     )
 
-    tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, CONFIG["tfidf"])
+    tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, CONFIG["tfidf"][target_key])
     x_train = transform_features(df_train, tfidf, ohe, cat_cols)
     x_test = transform_features(df_test, tfidf, ohe, cat_cols)
 
@@ -739,7 +749,7 @@ def run_tuning(df: pd.DataFrame, target_col: str, target_key: str, cat_cols: lis
         df_sub, test_size=CONFIG["test_size"], random_state=CONFIG["random_state"], stratify=stratify
     )
 
-    tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, CONFIG["tfidf"])
+    tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, CONFIG["tfidf"][target_key])
     x_train = transform_features(df_train, tfidf, ohe, cat_cols)
     x_test = transform_features(df_test, tfidf, ohe, cat_cols)
     y_train = df_train["target_encoded"].to_numpy(dtype=np.int64)
@@ -776,6 +786,93 @@ def run_tuning(df: pd.DataFrame, target_col: str, target_key: str, cat_cols: lis
     section(f"Classement final — {target_key}")
     for rank, (label, f1, acc, params) in enumerate(summary, 1):
         print(f"  #{rank}  {label:<25}  F1={f1:.4f}  Acc={acc:.4f}  {params}")
+
+
+NGRAM_EXPERIMENT_GRID = {
+    "ngram_ranges": [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3)],
+    "svc_C_values": [0.1, 0.5, 1.0, 5.0],
+    "max_features_values": [8000, 12000, 20000],
+}
+
+
+def run_ngram_experiment(df: pd.DataFrame, target_col: str, target_key: str, cat_cols: list[str]) -> None:
+    banner(f"EXPÉRIMENTATION N-GRAMS × LinearSVC — {target_key}")
+
+    df_sub = df[df[target_col].notna() & (df["Description"] != "")].copy()
+    df_sub = _filter_classes(df_sub, target_col, CONFIG["min_samples"])
+
+    label_encoder = LabelEncoder()
+    df_sub["target_encoded"] = label_encoder.fit_transform(df_sub[target_col])
+
+    stratify = (
+        df_sub["target_encoded"]
+        if df_sub["target_encoded"].value_counts().min() >= 2
+        else None
+    )
+    df_train, df_test = train_test_split(
+        df_sub, test_size=CONFIG["test_size"], random_state=CONFIG["random_state"], stratify=stratify
+    )
+    y_train = df_train["target_encoded"].to_numpy(dtype=np.int64)
+    y_test = df_test["target_encoded"].to_numpy(dtype=np.int64)
+
+    rs = CONFIG["random_state"]
+    results: list[tuple[float, float, tuple, int, float]] = []
+
+    total = (
+        len(NGRAM_EXPERIMENT_GRID["ngram_ranges"])
+        * len(NGRAM_EXPERIMENT_GRID["max_features_values"])
+        * len(NGRAM_EXPERIMENT_GRID["svc_C_values"])
+    )
+    print(f"  {total} combinaisons à tester (ngram × max_features × C)...\n")
+
+    for ngram_range in NGRAM_EXPERIMENT_GRID["ngram_ranges"]:
+        for max_features in NGRAM_EXPERIMENT_GRID["max_features_values"]:
+            tfidf_cfg = {**CONFIG["tfidf"], "ngram_range": ngram_range, "max_features": max_features}
+            tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, tfidf_cfg)
+            x_train = transform_features(df_train, tfidf, ohe, cat_cols)
+            x_test = transform_features(df_test, tfidf, ohe, cat_cols)
+
+            for C in NGRAM_EXPERIMENT_GRID["svc_C_values"]:
+                model = CalibratedClassifierCV(
+                    LinearSVC(C=C, class_weight="balanced", random_state=rs, max_iter=3000, dual="auto")
+                )
+                model.fit(x_train, y_train)
+                y_pred = model.predict(x_test)
+                f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
+                acc = accuracy_score(y_test, y_pred)
+                results.append((f1, acc, ngram_range, max_features, C))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+
+    section("Top 10 combinaisons")
+    print(f"  {'ngram':<10} {'max_feat':<10} {'C':<6} {'F1 macro':<12} {'Accuracy'}")
+    print("  " + "-" * 55)
+    for f1, acc, ngram, mf, C in results[:10]:
+        print(f"  {str(ngram):<10} {mf:<10} {C:<6} {f1:.4f}       {acc:.4f}")
+
+    section("Classement par ngram_range (meilleur F1)")
+    best_per_ngram: dict[tuple, tuple[float, float, int, float]] = {}
+    for f1, acc, ngram, mf, C in results:
+        if ngram not in best_per_ngram or f1 > best_per_ngram[ngram][0]:
+            best_per_ngram[ngram] = (f1, acc, mf, C)
+    for ngram in NGRAM_EXPERIMENT_GRID["ngram_ranges"]:
+        if ngram in best_per_ngram:
+            f1, acc, mf, C = best_per_ngram[ngram]
+            print(f"  {str(ngram):<10}  F1={f1:.4f}  Acc={acc:.4f}  max_features={mf}  C={C}")
+
+    best_f1, best_acc, best_ngram, best_mf, best_C = results[0]
+    section("Meilleure configuration globale")
+    metric_line("ngram_range", str(best_ngram))
+    metric_line("max_features", str(best_mf))
+    metric_line("C (LinearSVC)", str(best_C))
+    metric_line("F1 macro", f"{best_f1:.4f}")
+    metric_line("Accuracy", f"{best_acc:.4f}")
+
+
+def run_ngram_experiment_all(df: pd.DataFrame) -> None:
+    run_ngram_experiment(df, "OMV", "OMV", TABULAR_CONFIG["OMV"])
+    df_omv = df[df["OMV"] == "OUI"].copy()
+    run_ngram_experiment(df_omv, "ORIGINE_clean", "ORIGINE", TABULAR_CONFIG["ORIGINE"])
 
 
 def run_tuning_all(df: pd.DataFrame) -> None:
@@ -867,9 +964,9 @@ def print_manual_tests() -> None:
 # 10. MAIN
 # ============================================================================
 
-def main(comment: str = "", tune: bool = False) -> None:
+def main(comment: str = "", tune: bool = False, ngram_experiment: bool = False) -> None:
     banner("INITIALISATION")
-    print("  Backend modèle : TF-IDF + OneHotEncoder + LogisticRegression")
+    print("  Backend modèle : TF-IDF (par cible) + OneHotEncoder + LinearSVC (calibré)")
 
     banner("CHARGEMENT DES DONNÉES")
     df_raw = load_all_sources()
@@ -880,6 +977,10 @@ def main(comment: str = "", tune: bool = False) -> None:
     metric_line("Lignes totales après nettoyage", str(len(df)))
     det_rate = df["SERVICE_DETERMINISTE"].notna().mean() * 100
     metric_line("Demandeurs connus via JSON (%)", f"{det_rate:.1f}%")
+
+    if ngram_experiment:
+        run_ngram_experiment_all(df)
+        return
 
     if tune:
         run_tuning_all(df)
@@ -916,8 +1017,9 @@ if __name__ == "__main__":
 
     # Tuning
     parser.add_argument("--tune", action="store_true", help="Comparer LogReg / LinearSVC / RandomForest sur une grille de paramètres")
+    parser.add_argument("--ngram-experiment", action="store_true", help="Tester LinearSVC avec différentes configs n-grams TF-IDF")
 
     args = parser.parse_args()
 
     update_config_from_args(args)
-    main(comment=args.comment, tune=args.tune)
+    main(comment=args.comment, tune=args.tune, ngram_experiment=args.ngram_experiment)

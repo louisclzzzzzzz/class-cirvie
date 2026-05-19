@@ -7,3 +7,4 @@ timestamp,run_id,pipeline,model_type,omv_acc,omv_f1,svc_acc,svc_f1,ori_acc,ori_f
 2026-05-19 11:33:48,20260519_113348,main.py,TF-IDF + LogReg,0.9837,0.9830,N/A,N/A,0.7021,0.6658,
 2026-05-19 11:39:39,20260519_113939,main.py,TF-IDF + LogReg,0.9837,0.9830,N/A,N/A,0.6305,0.6060,
 2026-05-19 11:41:53,20260519_114153,main.py,TF-IDF + LogReg,0.9837,0.9830,N/A,N/A,0.5531,0.5234,
+2026-05-19 14:38:01,20260519_143801,main.py,TF-IDF + LogReg,0.9855,0.9848,N/A,N/A,0.7285,0.7510,LinearSVC optimisé - ngrams par cible
