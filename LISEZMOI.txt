@@ -1,0 +1,48 @@
+========================================================
+  CIRVIE — Classificateur d'incidents automatique
+  Macro Excel (sans Python requis)
+========================================================
+
+CONTENU DU DOSSIER
+------------------
+  predict_server.exe   Moteur de classification (tourne en arriere-plan)
+  ClasseurCIRVIE.xlsm  Classeur Excel avec les macros
+  LISEZMOI.txt         Ce fichier
+
+INSTALLATION
+------------
+1. Copiez les trois fichiers dans un meme dossier sur votre poste
+   (ex. : C:\CIRVIE\)
+
+2. Ouvrez ClasseurCIRVIE.xlsm avec Excel
+   - Si Excel affiche une barre jaune "Macros desactivees" :
+     cliquez sur "Activer le contenu"
+
+3. Remplissez les colonnes A a E sur la feuille "Saisie" :
+     A : Description de l'incident (texte libre)
+     B : Demandeur (ex. : DUPONT, Marie)
+     C : Cause (ex. : BASE DE DONNEES)
+     D : Traite par (ex. : MOA OMVIE)
+     E : Urgence (ex. : 2)
+
+4. Cliquez sur le bouton "Classifier" (ou utilisez le ruban).
+   La premiere fois, le serveur demarre automatiquement
+   (attente de quelques secondes).
+
+   Les resultats apparaissent en colonnes F, G, H :
+     F : INTERVENTION OMV  (OUI / NON)
+     G : SERVICE
+     H : ORIGINE
+
+REMARQUES
+---------
+- predict_server.exe doit rester dans le meme dossier que le classeur.
+- Le serveur s'arrete lorsque vous eteignez votre ordinateur.
+  La prochaine ouverture du classeur le relancera automatiquement.
+- Aucune connexion internet n'est necessaire.
+- En cas de probleme, fermez et rouvrez le classeur.
+
+SUPPORT
+-------
+En cas de dysfonctionnement, contactez votre administrateur
+ou l'equipe ayant fourni cet outil.
