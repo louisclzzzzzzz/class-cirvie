@@ -1,67 +1,63 @@
-# setup_excel.ps1 — Cree ClasseurCIRVIE.xlsm avec macros VBA
+# setup_excel.ps1
+# Convertit CIRVIE_INCIDENTS_2026.xlsx en .xlsm et injecte les macros VBA
 param([string]$RepoDir = $PSScriptRoot)
 
-$xlsmPath = Join-Path $RepoDir "ClasseurCIRVIE.xlsm"
+$xlsxPath = Join-Path $RepoDir "CIRVIE_INCIDENTS_2026.xlsx"
+$xlsmPath = Join-Path $RepoDir "CIRVIE_INCIDENTS_2026.xlsm"
 $basPath   = Join-Path $RepoDir "vba\modPredict.bas"
 
+if (-not (Test-Path $xlsxPath)) {
+    Write-Error "Fichier source introuvable : $xlsxPath"
+    exit 1
+}
 if (-not (Test-Path $basPath)) {
-    Write-Error "Fichier VBA introuvable : $basPath"
+    Write-Error "Module VBA introuvable : $basPath"
     exit 1
 }
 
 try {
     $excel = New-Object -ComObject Excel.Application
 } catch {
-    Write-Error "Excel n'est pas installe ou accessible via COM."
+    Write-Error "Excel n'est pas accessible via COM."
     exit 1
 }
 
-$excel.Visible        = $false
-$excel.DisplayAlerts  = $false
+$excel.Visible       = $false
+$excel.DisplayAlerts = $false
 
-$wb = $excel.Workbooks.Add()
-$ws = $wb.Worksheets.Item(1)
-$ws.Name = "Saisie"
-
-# En-têtes
-$headers = @("Description","Demandeur","Cause","Traite par","Urgence","OMV","SERVICE","ORIGINE")
-for ($i = 0; $i -lt $headers.Length; $i++) {
-    $cell = $ws.Cells.Item(1, $i + 1)
-    $cell.Value2 = $headers[$i]
-    $cell.Font.Bold = $true
-}
-
-# Mise en forme colonnes résultats (F, G, H)
-$ws.Columns.Item(1).ColumnWidth = 60   # Description
-$ws.Columns.Item(6).Interior.Color = 0xD9EAD3   # OMV vert clair
-$ws.Columns.Item(7).Interior.Color = 0xCFE2F3   # SERVICE bleu clair
-$ws.Columns.Item(8).Interior.Color = 0xFFF2CC   # ORIGINE jaune clair
-
-# Ligne d'exemple
-$ws.Cells.Item(2, 1).Value2 = "Rachat partiel sur le contrat 30421. Courrier non envoye."
-$ws.Cells.Item(2, 2).Value2 = "DUPONT, Marie"
-$ws.Cells.Item(2, 3).Value2 = "BASE DE DONNEES"
-$ws.Cells.Item(2, 4).Value2 = "MOA OMVIE"
-$ws.Cells.Item(2, 5).Value2 = "2"
+$wb = $excel.Workbooks.Open($xlsxPath)
 
 # Import du module VBA
 $imported = $false
 try {
-    # Nécessite "Faire confiance au modele d'objet du projet VBA"
-    # dans Fichier > Options > Centre de gestion de la confidentialite > Parametres des macros
     $wb.VBProject.VBComponents.Import($basPath) | Out-Null
     $imported = $true
     Write-Host "  [OK] Module VBA importe."
 } catch {
-    Write-Warning "Import VBA automatique impossible (acces au projet VBA restreint)."
-    Write-Warning "Etape manuelle : ALT+F11 > Fichier > Importer > vba\modPredict.bas"
+    Write-Warning "Import VBA automatique impossible (acces au projet VBA restreint par la politique IT)."
 }
 
-# Bouton "Classifier" (uniquement si VBA importé)
+# Ajout du bouton "Classifier" sur la feuille "TOUS LES INCIDENTS" (si VBA importé)
 if ($imported) {
-    $btn = $ws.Buttons.Add(480, 5, 120, 25)
-    $btn.Caption  = "Classifier"
-    $btn.OnAction = "ClassifierIncident"
+    try {
+        $ws = $wb.Worksheets.Item("TOUS LES INCIDENTS")
+
+        # Bouton ligne active
+        $btn1 = $ws.Buttons.Add(0, 0, 130, 22)
+        $btn1.Caption  = "Classifier cette ligne"
+        $btn1.OnAction = "ClassifierLigne"
+        $btn1.Placement = 3   # xlFreeFloating
+
+        # Bouton lignes vides
+        $btn2 = $ws.Buttons.Add(140, 0, 160, 22)
+        $btn2.Caption  = "Classifier lignes vides"
+        $btn2.OnAction = "ClassifierLignesVides"
+        $btn2.Placement = 3
+
+        Write-Host "  [OK] Boutons ajoutes sur la feuille 'TOUS LES INCIDENTS'."
+    } catch {
+        Write-Warning "Impossible d'ajouter les boutons : $_"
+    }
 }
 
 # Sauvegarde en .xlsm (52 = xlOpenXMLWorkbookMacroEnabled)
@@ -70,13 +66,15 @@ $wb.Close($false)
 $excel.Quit()
 [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null
 
-Write-Host "  [OK] Classeur sauvegarde : $xlsmPath"
+Write-Host ""
+Write-Host "  [OK] Fichier sauvegarde : $xlsmPath"
+
 if (-not $imported) {
     Write-Host ""
-    Write-Host "  ACTION REQUISE : importez le module VBA manuellement."
-    Write-Host "  1. Ouvrez ClasseurCIRVIE.xlsm"
-    Write-Host "  2. ALT+F11 > Fichier > Importer un fichier"
-    Write-Host "  3. Selectionnez : vba\modPredict.bas"
-    Write-Host "  4. Sauvegardez (Ctrl+S)"
+    Write-Host "  ACTION MANUELLE REQUISE :"
+    Write-Host "  1. Ouvrez CIRVIE_INCIDENTS_2026.xlsm"
+    Write-Host "  2. Appuyez sur ALT+F11 (editeur VBA)"
+    Write-Host "  3. Fichier > Importer un fichier > selectionnez : vba\modPredict.bas"
+    Write-Host "  4. Fermez l'editeur et sauvegardez (Ctrl+S)"
 }
 exit 0
