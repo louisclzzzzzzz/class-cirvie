@@ -1,49 +1,82 @@
-# Inc-classifier
+# CIRVIE Incident Classifier
 
-Projet de classification automatique d'incidents CIRVIE.
+Automatically classifies IT incident tickets into three business labels using a TF-IDF + LinearSVC pipeline — no GPU required.
 
-L'objectif est de prédire, à partir du texte d'un ticket et de quelques métadonnées, trois informations métier :
+![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-1.3%2B-orange?logo=scikitlearn)
+![Flask](https://img.shields.io/badge/Flask-3.0-black?logo=flask)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Build](https://github.com/louiscluzel/Inc-classifier/actions/workflows/build_exe.yml/badge.svg)
 
-- `INTERVENTION OMV` : classification binaire `OUI / NON`
-- `SERVICE` : service cible de traitement (`TOUS` ou service spécifique du demandeur)
-- `ORIGINE` : origine fonctionnelle ou technique de l'incident
+## What it does
 
-## Script principal : `main.py`
+Given an incident description and a few metadata fields (requester, cause, handled-by, urgency), the model predicts:
 
-### Entraînement
+| Label | Type | Best score |
+|---|---|---|
+| `INTERVENTION OMV` | Binary (OUI / NON) | 98.5% accuracy |
+| `SERVICE` | Target team | 79.0% accuracy |
+| `ORIGINE` | Root-cause category | 72.8% accuracy · 75.1% F1 |
+
+A **Windows Excel integration** is also included: a compiled Flask server (`predict_server.exe`) receives requests from a VBA macro, so business users can classify tickets directly from their spreadsheet without installing Python.
+
+## Project structure
+
+```
+Inc-classifier/
+├── .github/workflows/      CI — builds predict_server.exe on push
+├── data/                   Training data (not included — proprietary)
+├── models/                 Trained .pkl models (nom_service.json not included)
+├── outputs/                Experiment tracking (performance_runs.csv)
+├── scripts/                Build and setup scripts (bat, sh, ps1)
+├── vba/                    VBA module source (modPredict.bas)
+├── main.py                 Train and inference entry point
+├── predict_server.py       Flask HTTP server (packaged as .exe for Windows)
+├── metrics_logger.py       Logs metrics to outputs/performance_runs.csv
+├── get_data.py             Consolidates raw Excel/CSV files into data3.csv
+├── requirements.txt        Training dependencies
+└── requirements_server.txt Inference-only dependencies (Flask, no torch)
+```
+
+## Key features
+
+- **Three independent models** in a single pipeline: OMV (binary), SERVICE (multi-class), ORIGINE (multi-class)
+- **Hybrid SERVICE prediction**: ML decides SPECIFIC vs. ALL, then a deterministic JSON lookup maps the requester to their team
+- **No GPU needed**: pure scikit-learn sparse pipeline (TF-IDF + OneHotEncoder + LinearSVC)
+- **Excel-native delivery**: a PyInstaller `.exe` exposes the model as a local HTTP API consumed by an Excel VBA macro
+- **Experiment tracking**: every training run logs metrics to `outputs/performance_runs.csv`
+
+## Installation
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Train
 
 ```bash
 python3 main.py
 ```
 
-Options disponibles :
+Available options:
 
-| Option | Description | Exemple |
-|--------|-------------|---------|
-| `--comment` / `-m` | Commentaire associé au run | `-m "test C=2"` |
-| `--test-size` | Ratio du jeu de test | `--test-size 0.2` |
-| `--max-features` | Nombre max de features TF-IDF | `--max-features 12000` |
-| `--c-omv` | Régularisation C pour le modèle OMV | `--c-omv 2.0` |
-| `--c-service` | Régularisation C pour le modèle SERVICE | `--c-service 5.0` |
-| `--c-origine` | Régularisation C pour le modèle ORIGINE | `--c-origine 5.0` |
+| Option | Description | Default |
+|---|---|---|
+| `-m` / `--comment` | Tag this run with a comment | `""` |
+| `--test-size` | Test split ratio | `0.2` |
+| `--max-features` | TF-IDF vocabulary size | `8000` / `20000` |
+| `--c-omv` | LinearSVC regularization C (OMV) | `0.5` |
+| `--c-origine` | LinearSVC regularization C (ORIGINE) | `5.0` |
 
-Le script :
+Trained models are saved to `models/`.
 
-1. Charge `data3.csv` et `nom_service.json`
-2. Entraîne les trois modèles (OMV, SERVICE, ORIGINE)
-3. Affiche les métriques et un rapport de classification
-4. Exécute des cas de tests manuels
-5. Sauvegarde les artefacts
+> **Data not included**: the `data/` folder and `models/nom_service.json` are gitignored (proprietary). To retrain, provide your own CSV at `data/data3.csv` with columns: `Description`, `INTERVENTION OMV`, `SERVICE`, `ORIGINE`, `Traité par`, `Cause réelle`, `Urgence`, `Demandeur`. Use `get_data.py` to consolidate raw files from `data/raw/`. Supply your own `models/nom_service.json` (format: `{"TEAM_CODE": ["Agent Name", ...]}`)
 
-Artefacts générés :
-
-- `model_fast_omv.pkl`
-- `model_fast_service.pkl`
-- `model_fast_origine.pkl`
-
-### Inférence
-
-Après entraînement, importer et appeler `predict(...)` :
+### Predict (Python API)
 
 ```python
 from main import predict
@@ -56,101 +89,36 @@ result = predict(
     urgence="2",
     top_n=3,
 )
-
-print(result)
+# {'omv': {'prediction': 'OUI', 'confidence': 98.4, ...},
+#  'service': {'prediction': 'SER IND PARIS', ...},
+#  'origine': {'prediction': 'BASE DE DONNÉES', ...}}
 ```
 
-Structure retournée :
+### Excel integration (Windows)
 
-```python
-{
-    "omv": {
-        "prediction": "OUI",
-        "confidence": 98.4,        # pourcentage
-        "top_n": [{"classe": "OUI", "probabilite": 0.984}, ...]
-    },
-    "service": {
-        "prediction": "SER IND PARIS",
-        "confidence": 91.2,
-        "source": "deterministe",  # "deterministe" ou "tous"
-        "top_n": [{"classe": "SPECIFIQUE", "probabilite": 0.912}, ...]
-    },
-    "origine": {
-        "prediction": "BASE DE DONNÉES",
-        "confidence": 87.1,
-        "top_n": [{"classe": "BASE DE DONNÉES", "probabilite": 0.871}, ...]
-    }
-}
-```
+1. Download `predict_server.exe` from the [GitHub Actions artifact](../../actions) (built automatically on every push)
+2. Place it in the repo root alongside the `models/` folder
+3. Provide your own `data/CIRVIE_INCIDENTS_2026.xlsx` workbook
+4. Run `scripts\setup.bat` once to inject the VBA macro
+5. Open `data\CIRVIE_INCIDENTS_2026.xlsm` and click **Classify**
 
-## Logique SERVICE
-
-SERVICE est prédit en deux étapes :
-
-1. **ML binaire** : le modèle décide entre `SPECIFIQUE` (incident ciblant un service précis) ou `TOUS` (incident transverse).
-2. **Lookup JSON** : si le ML dit `SPECIFIQUE` et que le demandeur est référencé dans `nom_service.json`, on retourne son service associé. Sinon, `TOUS`.
-
-| ML prédit | Demandeur dans JSON | Résultat |
-|-----------|---------------------|----------|
-| SPECIFIQUE | oui | service du demandeur (ex. `SER IND PARIS`) |
-| SPECIFIQUE | non | `TOUS` |
-| TOUS | peu importe | `TOUS` |
-
-Les services valides sont uniquement ceux définis dans [`nom_service.json`](nom_service.json).
-
-## Pipeline général
-
-Chaque modèle combine :
-
-- **TF-IDF** sur la `Description` libre
-- **OneHotEncoder** sur les variables structurées : `Cause réelle`, `Traité par`, `Demandeur`, `Urgence`, ville extraite
-
-## Données attendues
-
-Le script lit `data3.csv` avec au minimum les colonnes :
-
-- `Description`
-- `INTERVENTION OMV`
-- `SERVICE`
-- `ORIGINE`
-- `Traité par`
-- `Cause réelle`
-- `Urgence`
-- `Demandeur`
-
-## Installation
+### Run the server manually
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-bash install.sh
+pip install -r requirements_server.txt
+python3 predict_server.py
+# POST http://localhost:8765/predict  {"description": "...", "demandeur": "...", ...}
 ```
 
-Ou manuellement :
+## Pipeline architecture
 
-```bash
-python3 -m pip install -r requirements.txt
-```
+Each model combines:
+- **TF-IDF** on free-text `Description` (bi/tri-grams, sublinear TF)
+- **OneHotEncoder** on structured fields: `Cause réelle`, `Traité par`, `Demandeur`, `Urgence`, extracted city
+- **LinearSVC** with Platt calibration (for probability estimates)
 
-## Autres scripts
+SERVICE uses a two-stage approach: ML predicts SPECIFIC vs. ALL, then a JSON lookup (`models/nom_service.json`, not included) maps the requester name to their exact team code.
 
-| Script | Rôle |
-|--------|------|
-| `get_data.py` | Consolide les fichiers bruts Excel/CSV en `data3.csv` |
-| `replace.py` | Correction ponctuelle de labels dans `data3.csv` |
-| `metrics_logger.py` | Enregistrement des métriques dans `performance_runs.csv` |
-| `predict_omv.py` | Baseline binaire OMV (historique) |
-| `predict_service_origine.py` | Baseline multi-classes SERVICE/ORIGINE (historique) |
-| `predict_cascade.py` | Pipeline en cascade historique |
+## License
 
-## Suivi des performances
-
-Chaque run enregistre automatiquement ses métriques dans [`performance_runs.csv`](performance_runs.csv) via `metrics_logger.py`.
-
-## Reconstruction du dataset
-
-```bash
-python3 get_data.py
-```
-
-Détecte les fichiers `.csv` / `.xlsx` dans `data_brut/`, harmonise les colonnes et génère `incidents_consolides.csv`.
+MIT

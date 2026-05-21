@@ -20,6 +20,7 @@ import itertools
 import json
 import pickle
 import re
+import sys
 import unicodedata
 import warnings
 from pathlib import Path
@@ -83,8 +84,13 @@ def update_config_from_args(args: argparse.Namespace):
     if args.c_origine:
         CONFIG["linearsvc"]["ORIGINE"]["C"] = args.c_origine
 
-DATA_FILE = "data3.csv"
-NOM_SERVICE_FILE = "nom_service.json"
+_IS_FROZEN = getattr(sys, "frozen", False)
+_ROOT = Path(sys.executable).parent if _IS_FROZEN else Path(__file__).parent
+_MODELS_DIR = _ROOT if _IS_FROZEN else _ROOT / "models"
+_DATA_DIR = _ROOT if _IS_FROZEN else _ROOT / "data"
+
+DATA_FILE = _DATA_DIR / "data3.csv"
+NOM_SERVICE_FILE = _MODELS_DIR / "nom_service.json"
 
 TARGET_OMV = "INTERVENTION OMV"
 TARGET_SERVICE = "SERVICE"
@@ -122,9 +128,9 @@ TABULAR_CONFIG = {
 }
 
 ARTIFACTS = {
-    "OMV": "model_fast_omv.pkl",
-    "SERVICE": "model_fast_service.pkl",
-    "ORIGINE": "model_fast_origine.pkl",
+    "OMV": str(_MODELS_DIR / "model_fast_omv.pkl"),
+    "SERVICE": str(_MODELS_DIR / "model_fast_service.pkl"),
+    "ORIGINE": str(_MODELS_DIR / "model_fast_origine.pkl"),
 }
 
 TUNING_GRIDS: dict[str, dict[str, Any]] = {
@@ -330,7 +336,7 @@ def load_all_sources() -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
             f"Fichier source introuvable : {DATA_FILE}\n"
-            "Placez data3.csv dans le répertoire courant avant de lancer le script."
+            "Place data3.csv in the data/ directory before running the script."
         )
     df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
     print(f"  chargé : {DATA_FILE:<28} ({len(df)} lignes, {df.shape[1]} colonnes)")

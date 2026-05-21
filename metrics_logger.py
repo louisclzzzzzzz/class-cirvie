@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 
 class PerformanceLogger:
-    def __init__(self, filename="performance_runs.csv"):
+    def __init__(self, filename="outputs/performance_runs.csv"):
         self.filename = filename
         self.headers = [
             "timestamp", 

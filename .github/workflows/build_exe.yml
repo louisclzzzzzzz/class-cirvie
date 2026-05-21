@@ -6,6 +6,7 @@ on:
     paths:
       - 'predict_server.py'
       - 'main.py'
+      - 'models/**'
       - 'requirements_server.txt'
       - '.github/workflows/build_exe.yml'
   workflow_dispatch:
@@ -38,13 +39,15 @@ jobs:
         run: |
           python -m PyInstaller --onefile --noconsole `
             --name predict_server `
+            --add-data "models\model_fast_omv.pkl;." `
+            --add-data "models\model_fast_service.pkl;." `
+            --add-data "models\model_fast_origine.pkl;." `
+            --add-data "models\nom_service.json;." `
             predict_server.py
 
-      - name: Move exe to repo root and commit
-        run: |
-          copy dist\predict_server.exe predict_server.exe
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add predict_server.exe
-          git diff --cached --quiet && echo "Pas de changement" || git commit -m "ci: rebuild predict_server.exe [skip ci]"
-          git push
+      - name: Upload exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: predict_server-windows
+          path: dist/predict_server.exe
+          retention-days: 90
