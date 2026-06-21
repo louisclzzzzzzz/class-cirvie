@@ -34,11 +34,12 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, f1_score, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from sklearn.svm import LinearSVC
 
 from metrics_logger import log_results
+from viz import save_confusion_matrix
 
 warnings.filterwarnings("ignore")
 
@@ -88,6 +89,7 @@ _IS_FROZEN = getattr(sys, "frozen", False)
 _ROOT = Path(sys.executable).parent if _IS_FROZEN else Path(__file__).parent
 _MODELS_DIR = _ROOT if _IS_FROZEN else _ROOT / "models"
 _DATA_DIR = _ROOT if _IS_FROZEN else _ROOT / "data"
+_OUTPUTS_DIR = _ROOT if _IS_FROZEN else _ROOT / "outputs"
 
 DATA_FILE = _DATA_DIR / "data3.csv"
 NOM_SERVICE_FILE = _MODELS_DIR / "nom_service.json"
@@ -318,6 +320,7 @@ def normalize_text_series(series: pd.Series) -> pd.Series:
         .str.strip()
         .str.upper()
         .replace({"": np.nan, "NAN": np.nan, "NONE": np.nan})
+        .astype(object)
     )
 
 
@@ -526,6 +529,63 @@ def _print_test_metrics(result: dict[str, Any], section_name: str) -> None:
     print(classification_report(result["y_true"], result["y_pred"], zero_division=0))
 
 
+def run_cross_validation(
+    df: pd.DataFrame,
+    target_col: str,
+    target_key: str,
+    cat_cols: list[str],
+    n_splits: int = 5,
+) -> dict[str, Any]:
+    """K-Fold stratifiée sur (TF-IDF + OHE + LinearSVC), sans data leakage entre folds."""
+    label_encoder = LabelEncoder()
+    df_sub = df.copy()
+    df_sub["target_encoded"] = label_encoder.fit_transform(df_sub[target_col])
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=CONFIG["random_state"])
+
+    scores: list[dict[str, float]] = []
+    y_all = df_sub["target_encoded"].to_numpy(dtype=np.int64)
+
+    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(df_sub, y_all), start=1):
+        df_train = df_sub.iloc[train_idx]
+        df_test = df_sub.iloc[test_idx]
+
+        tfidf, ohe = fit_feature_pipeline(df_train, cat_cols, CONFIG["tfidf"][target_key])
+        x_train = transform_features(df_train, tfidf, ohe, cat_cols)
+        x_test = transform_features(df_test, tfidf, ohe, cat_cols)
+
+        y_train = df_train["target_encoded"].to_numpy(dtype=np.int64)
+        y_test = df_test["target_encoded"].to_numpy(dtype=np.int64)
+
+        model = build_model(target_key)
+        model.fit(x_train, y_train)
+        y_pred = model.predict(x_test)
+
+        fold_accuracy = accuracy_score(y_test, y_pred)
+        fold_f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
+        scores.append({"fold": fold_idx, "accuracy": fold_accuracy, "f1_macro": fold_f1})
+
+    accuracies = np.array([s["accuracy"] for s in scores])
+    f1s = np.array([s["f1_macro"] for s in scores])
+
+    return {
+        "mean_accuracy": float(accuracies.mean()),
+        "std_accuracy": float(accuracies.std()),
+        "mean_f1": float(f1s.mean()),
+        "std_f1": float(f1s.std()),
+        "scores": scores,
+        "n_splits": n_splits,
+    }
+
+
+def print_cross_validation(label: str, cv_result: dict[str, Any]) -> None:
+    metric_line(
+        f"{label} Accuracy",
+        f"{cv_result['mean_accuracy']:.4f} ± {cv_result['std_accuracy']:.4f}   "
+        f"F1 macro {cv_result['mean_f1']:.4f} ± {cv_result['std_f1']:.4f}",
+    )
+
+
 # ============================================================================
 # 6. PIPELINES PAR CIBLE
 # ============================================================================
@@ -550,6 +610,39 @@ def run_pipeline_origine(df: pd.DataFrame) -> dict[str, Any]:
     return result
 
 
+def service_coverage_report(df: pd.DataFrame, agent_to_service: dict[str, str]) -> dict[str, Any]:
+    total = len(df)
+    covered_mask = df["SERVICE_DETERMINISTE"].notna()
+    covered = int(covered_mask.sum())
+    falls_to_tous = total - covered
+
+    uncovered_demandeurs = df.loc[~covered_mask, "DEMANDEUR"].value_counts()
+    top_uncovered = [(name, int(count)) for name, count in uncovered_demandeurs.head(10).items()]
+
+    service_distribution = (
+        df["SERVICE_DETERMINISTE"].fillna("TOUS").value_counts().to_dict()
+    )
+    service_distribution = {str(k): int(v) for k, v in service_distribution.items()}
+
+    return {
+        "total_incidents": total,
+        "covered_by_lookup": covered,
+        "coverage_pct": round(covered / max(total, 1) * 100, 2),
+        "falls_to_tous": falls_to_tous,
+        "top_uncovered_demandeurs": top_uncovered,
+        "service_distribution": service_distribution,
+    }
+
+
+def save_service_coverage_report(report: dict[str, Any], output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    out_path = output_dir / f"service_coverage_{timestamp}.json"
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=2)
+    return out_path
+
+
 def run_pipeline_service(df: pd.DataFrame, agent_to_service: dict[str, str]) -> dict[str, Any]:
     banner("ETAPE 2 — SERVICE (lookup déterministe)")
 
@@ -561,9 +654,15 @@ def run_pipeline_service(df: pd.DataFrame, agent_to_service: dict[str, str]) -> 
     metric_line("Demandeurs identifiés → service spécifique", f"{n_known} ({pct_known:.1f}%)")
     metric_line("Non identifiés → TOUS", f"{len(df) - n_known} ({100 - pct_known:.1f}%)")
 
+    coverage = service_coverage_report(df, agent_to_service)
+    section("Rapport de couverture détaillé")
+    metric_line("Couverture lookup", f"{coverage['coverage_pct']:.1f}%")
+    metric_line("Top demandeurs non couverts", str(coverage["top_uncovered_demandeurs"][:5]))
+
     return {
         "label": "SERVICE",
         "agent_to_service": agent_to_service,
+        "coverage_report": coverage,
     }
 
 
@@ -661,6 +760,13 @@ def _infer_single(key: str, row: pd.DataFrame, top_n: int) -> dict[str, Any]:
     return _predict_from_bundle(load_inference_bundle(key), row, top_n)
 
 
+def _flag_if_low_confidence(label_result: dict[str, Any], raw_confidence: float, confidence_threshold: float) -> dict[str, Any]:
+    if confidence_threshold > 0.0 and raw_confidence < confidence_threshold:
+        label_result["flagged_for_review"] = True
+        label_result["reason"] = "low_confidence"
+    return label_result
+
+
 def predict(
     description: str,
     demandeur: str = "INCONNU",
@@ -668,18 +774,21 @@ def predict(
     traite: str = "INCONNU",
     urgence: Any = None,
     top_n: int = 3,
+    confidence_threshold: float = 0.0,
 ) -> dict[str, Any]:
     row = _prepare_inference_row(description, demandeur, cause, traite, urgence)
 
     omv = _infer_single("OMV", row, top_n=2)
 
     if omv["prediction"] == "NON":
+        omv_result = {
+            "prediction": "NON",
+            "confidence": round(omv["confidence"] * 100, 1),
+            "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in omv["top_n"]],
+        }
+        _flag_if_low_confidence(omv_result, omv["confidence"], confidence_threshold)
         return {
-            "omv": {
-                "prediction": "NON",
-                "confidence": round(omv["confidence"] * 100, 1),
-                "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in omv["top_n"]],
-            },
+            "omv": omv_result,
             "service": None,
             "origine": None,
         }
@@ -694,23 +803,29 @@ def predict(
 
     origine = _infer_single("ORIGINE", row, top_n=top_n)
 
+    omv_result = {
+        "prediction": "OUI",
+        "confidence": round(omv["confidence"] * 100, 1),
+        "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in omv["top_n"]],
+    }
+    _flag_if_low_confidence(omv_result, omv["confidence"], confidence_threshold)
+
+    origine_result = {
+        "prediction": origine["prediction"],
+        "confidence": round(origine["confidence"] * 100, 1),
+        "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in origine["top_n"]],
+    }
+    _flag_if_low_confidence(origine_result, origine["confidence"], confidence_threshold)
+
     return {
-        "omv": {
-            "prediction": "OUI",
-            "confidence": round(omv["confidence"] * 100, 1),
-            "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in omv["top_n"]],
-        },
+        "omv": omv_result,
         "service": {
             "prediction": selected_service,
             "confidence": 100.0,
             "source": service_source,
             "top_n": [{"classe": selected_service, "probabilite": 1.0}],
         },
-        "origine": {
-            "prediction": origine["prediction"],
-            "confidence": round(origine["confidence"] * 100, 1),
-            "top_n": [{"classe": item["classe"], "probabilite": round(item["probabilite"], 4)} for item in origine["top_n"]],
-        },
+        "origine": origine_result,
     }
 
 
@@ -970,7 +1085,7 @@ def print_manual_tests() -> None:
 # 10. MAIN
 # ============================================================================
 
-def main(comment: str = "", tune: bool = False, ngram_experiment: bool = False) -> None:
+def main(comment: str = "", tune: bool = False, ngram_experiment: bool = False, run_cv: bool = True) -> None:
     banner("INITIALISATION")
     print("  Backend modèle : TF-IDF (par cible) + OneHotEncoder + LinearSVC (calibré)")
 
@@ -996,6 +1111,26 @@ def main(comment: str = "", tune: bool = False, ngram_experiment: bool = False) 
     results["OMV"] = run_pipeline_omv(df)
     results["SERVICE"] = run_pipeline_service(df, agent_to_service)
     results["ORIGINE"] = run_pipeline_origine(df)
+
+    save_confusion_matrix(results["OMV"], "OMV", _OUTPUTS_DIR)
+    save_confusion_matrix(results["ORIGINE"], "ORIGINE", _OUTPUTS_DIR)
+    save_service_coverage_report(results["SERVICE"]["coverage_report"], _OUTPUTS_DIR)
+
+    if run_cv:
+        section("Cross-validation (5-fold stratifiée)")
+        df_omv = df[df["OMV"].notna() & (df["Description"] != "")]
+        df_omv = df_omv[df_omv["OMV"].isin(df_omv["OMV"].value_counts()[lambda c: c >= CONFIG["min_samples"]].index)]
+        cv_omv = run_cross_validation(df_omv, "OMV", "OMV", TABULAR_CONFIG["OMV"])
+
+        df_origine = df[df["ORIGINE_clean"].notna() & (df["OMV"] == "OUI") & (df["Description"] != "")]
+        df_origine = df_origine[
+            df_origine["ORIGINE_clean"].isin(
+                df_origine["ORIGINE_clean"].value_counts()[lambda c: c >= CONFIG["min_samples"]].index
+            )
+        ]
+        cv_origine = run_cross_validation(df_origine, "ORIGINE_clean", "ORIGINE", TABULAR_CONFIG["ORIGINE"])
+        print_cross_validation("OMV    ", cv_omv)
+        print_cross_validation("ORIGINE", cv_origine)
 
     section("Sauvegarde des artefacts")
     save_artifact("OMV", results["OMV"])
@@ -1024,8 +1159,9 @@ if __name__ == "__main__":
     # Tuning
     parser.add_argument("--tune", action="store_true", help="Comparer LogReg / LinearSVC / RandomForest sur une grille de paramètres")
     parser.add_argument("--ngram-experiment", action="store_true", help="Tester LinearSVC avec différentes configs n-grams TF-IDF")
+    parser.add_argument("--no-cv", action="store_true", help="Désactiver la cross-validation 5-fold (gain de temps en CI)")
 
     args = parser.parse_args()
 
     update_config_from_args(args)
-    main(comment=args.comment, tune=args.tune, ngram_experiment=args.ngram_experiment)
+    main(comment=args.comment, tune=args.tune, ngram_experiment=args.ngram_experiment, run_cv=not args.no_cv)
