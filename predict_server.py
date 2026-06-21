@@ -32,6 +32,8 @@ def health():
 @app.route("/predict", methods=["POST"])
 def do_predict():
     data = request.get_json(force=True, silent=True) or {}
+    if not data.get("description"):
+        return jsonify({"error": "description is required"}), 400
     try:
         result = predict(
             description=data.get("description", ""),
@@ -40,6 +42,7 @@ def do_predict():
             traite=data.get("traite", "INCONNU"),
             urgence=data.get("urgence"),
             top_n=3,
+            confidence_threshold=data.get("confidence_threshold", 0.0),
         )
         return jsonify(result)
     except Exception as exc:

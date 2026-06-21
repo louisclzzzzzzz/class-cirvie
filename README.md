@@ -7,6 +7,8 @@ Automatically classifies IT incident tickets into three business labels using a 
 ![Flask](https://img.shields.io/badge/Flask-3.0-black?logo=flask)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Build](https://github.com/louiscluzel/Inc-classifier/actions/workflows/build_exe.yml/badge.svg)
+[![Tests](https://github.com/louisclzzzzzzz/CIRVIE-Incident-Classifier/actions/workflows/test.yml/badge.svg)](https://github.com/louisclzzzzzzz/CIRVIE-Incident-Classifier/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/louisclzzzzzzz/CIRVIE-Incident-Classifier/branch/main/graph/badge.svg)](https://codecov.io/gh/louisclzzzzzzz/CIRVIE-Incident-Classifier)
 
 ## What it does
 
@@ -109,6 +111,17 @@ pip install -r requirements_server.txt
 python3 predict_server.py
 # POST http://localhost:8765/predict  {"description": "...", "demandeur": "...", ...}
 ```
+
+## Testing
+
+The test suite (`tests/`) runs entirely on synthetic, hand-crafted data — no proprietary `data3.csv` or `nom_service.json` is required. It covers data cleaning, model training/inference, the SERVICE lookup, the Flask server (mocked models), and 5-fold cross-validation.
+
+```bash
+pip install -r requirements.txt pytest pytest-cov
+pytest tests/ -v
+```
+
+Training also runs a stratified 5-fold cross-validation by default (`python3 main.py`); pass `--no-cv` to skip it.
 
 ## Pipeline architecture
 
